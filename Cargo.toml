@@ -1,0 +1,32 @@
+[package]
+name = "pumpfun-sniper-starter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arc-swap = "1"
+base64 = "0.22"
+bincode = "1"
+borsh = "1"
+bs58 = "0.5"
+chrono = "0.4.44"
+dirs = "6"
+dotenvy = "0.15"
+futures = "0.3"
+quinn = "0.11"
+rand = "0.9"
+rustls = { version = "0.23", features = ["ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+solana-client = "2"
+solana-sdk = "2"
+solana-tls-utils = "2"
+spl-associated-token-account = { version = "6", features = ["no-entrypoint"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ratatui = "0.29"
+crossterm = "0.28"
+yellowstone-grpc-client = "11"
+yellowstone-grpc-proto = "11"
