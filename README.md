@@ -9,7 +9,7 @@ PumpFun token sniffer TUI. See every launch and trade in real-time, buy and sell
 3. Clone this repo and copy the example env:
 
 ```
-git clone <repo-url>
+git clone github.com/useSolami/starter-pumpfunSniffer
 cd pumpfun-sniper-starter
 cp .env.example .env
 ```
