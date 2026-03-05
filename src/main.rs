@@ -175,6 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.refresh_position_views().await;
 
     let tick_rate = Duration::from_millis(66);
+    let mut last_refresh = std::time::Instant::now();
 
     while app.running {
         terminal.draw(|frame| ui::draw(frame, &app))?;
@@ -204,6 +205,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         KeyCode::Char('r') | KeyCode::Char('R') => {
                             app.handle_refresh_pnl();
+                        }
+                        KeyCode::Char('o') | KeyCode::Char('O') => {
+                            app.open_in_browser();
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
                             app.move_up();
@@ -247,6 +251,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.apply_metadata(mint, meta);
                 }
             }
+        }
+
+        if last_refresh.elapsed() >= Duration::from_secs(10) {
+            app.handle_refresh_pnl_silent();
+            last_refresh = std::time::Instant::now();
         }
 
         app.refresh_position_views().await;

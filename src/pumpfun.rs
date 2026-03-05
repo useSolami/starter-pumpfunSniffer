@@ -197,6 +197,27 @@ impl BondingCurveAccount {
         tokens.min(rtr) as u64
     }
 
+    pub fn get_buy_cost_for_tokens(&self, token_amount: u64) -> u64 {
+        if token_amount == 0 || self.virtual_token_reserves == 0 {
+            return 0;
+        }
+        let total_fee_bps = FEE_BASIS_POINTS
+            + if self.creator != Pubkey::default() {
+                CREATOR_FEE
+            } else {
+                0
+            };
+        let vtr = self.virtual_token_reserves as u128;
+        let vsr = self.virtual_sol_reserves as u128;
+        let tokens = token_amount as u128;
+        let sol_without_fee = tokens.checked_mul(vsr).unwrap_or(0)
+            .checked_div(vtr.saturating_sub(tokens).max(1)).unwrap_or(0);
+        let sol_with_fee = sol_without_fee
+            .checked_mul(total_fee_bps as u128 + 10_000).unwrap_or(0)
+            .checked_div(10_000).unwrap_or(0);
+        sol_with_fee as u64
+    }
+
     pub fn get_sell_price(&self, amount: u64) -> Result<u64, PumpFunError> {
         if self.complete {
             return Err(PumpFunError::CurveComplete);
@@ -355,16 +376,78 @@ fn parse_metadata_fields(data: &[u8]) -> Option<TokenMeta> {
     Some(TokenMeta { name, symbol })
 }
 
+fn parse_token2022_metadata(data: &[u8]) -> Option<TokenMeta> {
+    const BASE_MINT_SIZE: usize = 165;
+    const ACCOUNT_TYPE_SIZE: usize = 1;
+    const TLV_HEADER: usize = BASE_MINT_SIZE + ACCOUNT_TYPE_SIZE;
+    const TOKEN_METADATA_TYPE: u16 = 19;
+
+    if data.len() < TLV_HEADER + 4 {
+        return None;
+    }
+
+    let mut offset = TLV_HEADER;
+    while offset + 4 <= data.len() {
+        let ext_type = u16::from_le_bytes(data[offset..offset + 2].try_into().ok()?);
+        let ext_len = u16::from_le_bytes(data[offset + 2..offset + 4].try_into().ok()?) as usize;
+        offset += 4;
+
+        if offset + ext_len > data.len() {
+            break;
+        }
+
+        if ext_type == TOKEN_METADATA_TYPE {
+            let ext_data = &data[offset..offset + ext_len];
+            if ext_data.len() < 64 + 4 {
+                return None;
+            }
+            let mut pos = 64;
+
+            let name_len = u32::from_le_bytes(ext_data[pos..pos + 4].try_into().ok()?) as usize;
+            pos += 4;
+            if pos + name_len > ext_data.len() { return None; }
+            let name = String::from_utf8_lossy(&ext_data[pos..pos + name_len])
+                .trim_end_matches('\0')
+                .to_string();
+            pos += name_len;
+
+            if pos + 4 > ext_data.len() { return None; }
+            let symbol_len = u32::from_le_bytes(ext_data[pos..pos + 4].try_into().ok()?) as usize;
+            pos += 4;
+            if pos + symbol_len > ext_data.len() { return None; }
+            let symbol = String::from_utf8_lossy(&ext_data[pos..pos + symbol_len])
+                .trim_end_matches('\0')
+                .to_string();
+
+            if !name.is_empty() || !symbol.is_empty() {
+                return Some(TokenMeta { name, symbol });
+            }
+        }
+
+        offset += ext_len;
+    }
+    None
+}
+
 pub async fn fetch_token_metadata(
     rpc: &RpcClient,
     mint: &Pubkey,
 ) -> Result<TokenMeta, PumpFunError> {
     let pda = get_metadata_pda(mint);
-    let account = rpc.get_account(&pda).await?;
-    parse_metadata_fields(&account.data).ok_or_else(|| {
+    match rpc.get_account(&pda).await {
+        Ok(account) => {
+            if let Some(meta) = parse_metadata_fields(&account.data) {
+                return Ok(meta);
+            }
+        }
+        Err(_) => {}
+    }
+
+    let mint_account = rpc.get_account(mint).await?;
+    parse_token2022_metadata(&mint_account.data).ok_or_else(|| {
         PumpFunError::Deserialize(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "failed to parse metadata",
+            "no metadata found in metaplex or token-2022 extension",
         ))
     })
 }

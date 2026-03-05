@@ -20,7 +20,7 @@ pub async fn buy_token(
     slippage_bps: u64,
     priority_fee_lamports: u64,
     tip_amount_lamports: u64,
-) -> Result<(Signature, u64), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(Signature, u64, u64), Box<dyn std::error::Error + Send + Sync>> {
     let mut curve = None;
     for attempt in 0..3 {
         match pumpfun::fetch_bonding_curve(rpc, mint).await {
@@ -36,11 +36,12 @@ pub async fn buy_token(
     }
     let curve = curve.ok_or("failed to fetch bonding curve after 3 retries")?;
 
-    let token_amount = curve.get_buy_token_amount_from_sol_amount(buy_amount_lamports);
-    if token_amount == 0 {
+    let raw_token_amount = curve.get_buy_token_amount_from_sol_amount(buy_amount_lamports);
+    if raw_token_amount == 0 {
         return Err("calculated 0 tokens for buy".into());
     }
-
+    let token_amount = raw_token_amount.saturating_sub(raw_token_amount * slippage_bps / 10_000);
+    let actual_sol_cost = curve.get_buy_cost_for_tokens(token_amount);
     let max_sol_cost = buy_amount_lamports + (buy_amount_lamports * slippage_bps / 10_000);
 
     let create_ata_ix = create_associated_token_account_idempotent(
@@ -81,8 +82,8 @@ pub async fn buy_token(
             send_transaction::send_transaction_rpc(rpc, &tx).await?},
     };
 
-    info!(%sig, %mint, token_amount, "buy tx sent");
-    Ok((sig, token_amount))
+    info!(%sig, %mint, token_amount, actual_sol_cost, "buy tx sent");
+    Ok((sig, token_amount, actual_sol_cost))
 }
 
 pub async fn sell_token(

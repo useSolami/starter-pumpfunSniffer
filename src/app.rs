@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
+
+use borsh::BorshDeserialize;
 
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
@@ -37,6 +40,7 @@ pub struct FeedItem {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct PositionView {
     pub mint: Pubkey,
     pub symbol: String,
@@ -55,6 +59,7 @@ pub enum Panel {
     Positions,
 }
 
+#[allow(dead_code)]
 pub enum Action {
     NewFeedItem(FeedItem),
     GrpcConnected(bool),
@@ -180,7 +185,7 @@ impl App {
         let config = Arc::clone(&self.config);
         let action_tx = self.action_tx.clone();
         tokio::spawn(async move {
-            let rpc = RpcClient::new(config.rpc_url.clone());
+            let rpc = RpcClient::new_with_commitment(config.rpc_url.clone(), solana_sdk::commitment_config::CommitmentConfig::processed());
             match pumpfun::fetch_token_metadata(&rpc, &mint).await {
                 Ok(meta) => {
                     let _ = action_tx.send(Action::MetadataResolved { mint, meta });
@@ -223,7 +228,7 @@ impl App {
         let config = Arc::clone(&self.config);
         let action_tx = self.action_tx.clone();
         tokio::spawn(async move {
-            let rpc = RpcClient::new(config.rpc_url.clone());
+            let rpc = RpcClient::new_with_commitment(config.rpc_url.clone(), solana_sdk::commitment_config::CommitmentConfig::processed());
             match rpc.get_balance(&config.payer.pubkey()).await {
                 Ok(lamports) => {
                     let sol = lamports as f64 / 1_000_000_000.0;
@@ -259,7 +264,6 @@ impl App {
                         item.name = meta.name.clone();
                         self.trades.insert(0, item);
                     } else {
-                        self.ensure_metadata(mint);
                         self.trades.insert(0, item);
                     }
                 } else {
@@ -420,6 +424,21 @@ impl App {
         }
     }
 
+    pub fn selected_mint(&self) -> Option<Pubkey> {
+        match self.active_panel {
+            Panel::Launches => self.launches.get(self.selected_launch).map(|i| i.mint),
+            Panel::Trades => self.trades.get(self.selected_trade).map(|i| i.mint),
+            Panel::Positions => self.position_views.get(self.selected_position).map(|p| p.mint),
+        }
+    }
+
+    pub fn open_in_browser(&self) {
+        if let Some(mint) = self.selected_mint() {
+            let url = format!("https://pump.fun/coin/{}", mint);
+            let _ = open::that(&url);
+        }
+    }
+
     pub fn handle_buy_selected(&mut self) {
         let item = match self.selected_feed_item() {
             Some(item) => item,
@@ -446,29 +465,24 @@ impl App {
         tokio::spawn(async move {
             {
                 let mut store = positions.write().await;
-                if store.contains_key(&mint) {
-                    let _ = action_tx.send(Action::StatusMessage(format!(
-                        "Already holding {}",
-                        sym
-                    )));
-                    return;
-                }
-                store.insert(
-                    mint,
-                    Position {
+                if !store.contains_key(&mint) {
+                    store.insert(
                         mint,
-                        bonding_curve,
-                        creator,
-                        lamports_invested: config.buy_amount_lamports,
-                        token_amount: 0,
-                        entry_timestamp: chrono::Utc::now().timestamp(),
-                        symbol: sym.clone(),
-                        name: nm.clone(),
-                    },
-                );
+                        Position {
+                            mint,
+                            bonding_curve,
+                            creator,
+                            lamports_invested: 0,
+                            token_amount: 0,
+                            entry_timestamp: chrono::Utc::now().timestamp(),
+                            symbol: sym.clone(),
+                            name: nm.clone(),
+                        },
+                    );
+                }
             }
 
-            let rpc = RpcClient::new(config.rpc_url.clone());
+            let rpc = RpcClient::new_with_commitment(config.rpc_url.clone(), solana_sdk::commitment_config::CommitmentConfig::processed());
             match trader::buy_token(
                 &rpc,
                 sender.as_deref(),
@@ -482,7 +496,7 @@ impl App {
             )
             .await
             {
-                Ok((sig, token_amount)) => {
+                Ok((sig, token_amount, actual_sol_cost)) => {
                     info!(%sig, %mint, token_amount, "buy tx sent");
                     let _ = action_tx.send(Action::StatusMessage(format!(
                         "Buy {} sent: {}",
@@ -491,27 +505,27 @@ impl App {
                     )));
                     {
                         let mut store = positions.write().await;
-                        let entry_timestamp = store
-                            .get(&mint)
-                            .map(|p| p.entry_timestamp)
-                            .unwrap_or_else(|| chrono::Utc::now().timestamp());
-                        store.insert(
-                            mint,
-                            Position {
+                        if let Some(existing) = store.get_mut(&mint) {
+                            existing.lamports_invested += actual_sol_cost;
+                            existing.token_amount += token_amount;
+                        } else {
+                            store.insert(
                                 mint,
-                                bonding_curve,
-                                creator,
-                                lamports_invested: config.buy_amount_lamports,
-                                token_amount,
-                                entry_timestamp,
-                                symbol: sym.clone(),
-                                name: nm.clone(),
-                            },
-                        );
+                                Position {
+                                    mint,
+                                    bonding_curve,
+                                    creator,
+                                    lamports_invested: actual_sol_cost,
+                                    token_amount,
+                                    entry_timestamp: chrono::Utc::now().timestamp(),
+                                    symbol: sym.clone(),
+                                    name: nm.clone(),
+                                },
+                            );
+                        }
                         save_positions(&store);
                     }
 
-                    let positions_poll = positions.clone();
                     let action_tx2 = action_tx.clone();
                     let sym2 = sym.clone();
                     let config2 = Arc::clone(&config);
@@ -549,7 +563,11 @@ impl App {
                         sym, e
                     )));
                     let mut store = positions.write().await;
-                    store.remove(&mint);
+                    if let Some(p) = store.get_mut(&mint) {
+                        if p.token_amount == 0 {
+                            store.remove(&mint);
+                        }
+                    }
                     save_positions(&store);
                 }
             }
@@ -587,7 +605,7 @@ impl App {
                 }
             };
 
-            let rpc = RpcClient::new(config.rpc_url.clone());
+            let rpc = RpcClient::new_with_commitment(config.rpc_url.clone(), solana_sdk::commitment_config::CommitmentConfig::processed());
             match trader::sell_token(
                 &rpc,
                 sender.as_deref(),
@@ -625,15 +643,25 @@ impl App {
             }
         });
     }
+    pub fn handle_refresh_pnl_silent(&mut self) {
+        self.handle_refresh_pnl_inner(false);
+    }
+
     pub fn handle_refresh_pnl(&mut self) {
-        self.status_message = "Refreshing positions...".into();
+        self.handle_refresh_pnl_inner(true);
+    }
+
+    fn handle_refresh_pnl_inner(&mut self, show_status: bool) {
+        if show_status {
+            self.status_message = "Refreshing positions...".into();
+        }
         let positions = self.positions.clone();
         let config = Arc::clone(&self.config);
         let action_tx = self.action_tx.clone();
         let meta_cache = self.meta_cache.clone();
 
         tokio::spawn(async move {
-            let rpc = RpcClient::new(config.rpc_url.clone());
+            let rpc = RpcClient::new_with_commitment(config.rpc_url.clone(), solana_sdk::commitment_config::CommitmentConfig::processed());
             let snapshot: Vec<Position> = {
                 let store = positions.read().await;
                 store.values().cloned().collect()
@@ -641,21 +669,41 @@ impl App {
 
             for position in snapshot {
                 let mint = position.mint;
+                let token_program = match rpc_with_backoff(&action_tx, || rpc.get_account(&mint)).await {
+                    Ok(acc) => acc.owner,
+                    Err(e) => {
+                        warn!(error = %e, %mint, "failed to fetch mint account, skipping");
+                        continue;
+                    }
+                };
                 let ata = get_associated_token_address_with_program_id(
                     &config.payer.pubkey(),
                     &mint,
-                    &pumpfun::TOKEN_PROGRAM_2022,
+                    &token_program,
                 );
-                let real_token_amount: u64 = match rpc.get_token_account_balance(&ata).await {
-                    Ok(balance) => balance.amount.parse().unwrap_or(0),
-                    Err(_) => 0,
+                let real_token_amount: u64 = match rpc_with_backoff(&action_tx, || rpc.get_token_account_balance(&ata)).await {
+                    Ok(b) => b.amount.parse().unwrap_or(0),
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if msg.contains("could not find account") || msg.contains("not found") {
+                            info!(%mint, "token account not found on-chain, removing position");
+                            let mut store = positions.write().await;
+                            store.remove(&mint);
+                            save_positions(&store);
+                            continue;
+                        }
+                        warn!(error = %e, %mint, "failed to fetch token balance, skipping");
+                        continue;
+                    }
                 };
+
                 if real_token_amount != position.token_amount && real_token_amount > 0 {
                     let mut store = positions.write().await;
                     if let Some(p) = store.get_mut(&mint) {
                         p.token_amount = real_token_amount;
                     }
                 }
+
                 if real_token_amount == 0 && position.token_amount > 0 {
                     info!(%mint, "no tokens held on-chain, removing position");
                     let mut store = positions.write().await;
@@ -667,24 +715,41 @@ impl App {
                 if real_token_amount == 0 {
                     continue;
                 }
-                let (pnl_pct, current_value_sol) =
-                    match pumpfun::fetch_bonding_curve(&rpc, &mint).await {
-                        Ok(curve) => match curve.get_sell_price(real_token_amount) {
-                            Ok(sell_value) => {
-                                let pnl = ((sell_value as f64)
-                                    - (position.lamports_invested as f64))
-                                    / (position.lamports_invested as f64)
-                                    * 100.0;
-                                let val = sell_value as f64 / 1_000_000_000.0;
-                                (Some(pnl), Some(val))
+                let (pnl_pct, current_value_sol) = match pumpfun::get_bonding_curve_pda(&mint) {
+                    Some(pda) => match rpc_with_backoff(&action_tx, || rpc.get_account(&pda)).await {
+                        Ok(acc) => {
+                            let mut data = acc.data.as_slice();
+                            match pumpfun::BondingCurveAccount::deserialize(&mut data) {
+                                Ok(curve) => match curve.get_sell_price(real_token_amount) {
+                                    Ok(sell_value) => {
+                                        let pnl = ((sell_value as f64)
+                                            - (position.lamports_invested as f64))
+                                            / (position.lamports_invested as f64)
+                                            * 100.0;
+                                        let val = sell_value as f64 / 1_000_000_000.0;
+                                        (Some(pnl), Some(val))
+                                    }
+                                    Err(e) => {
+                                        warn!(error = %e, %mint, "get_sell_price failed");
+                                        (None, None)
+                                    }
+                                },
+                                Err(e) => {
+                                    warn!(error = %e, %mint, "failed to deserialize bonding curve");
+                                    (None, None)
+                                }
                             }
-                            Err(_) => (None, None),
-                        },
+                        }
                         Err(e) => {
-                            warn!(error = %e, %mint, "failed to fetch bonding curve for P&L");
+                            warn!(error = %e, %mint, "failed to fetch bonding curve account");
                             (None, None)
                         }
-                    };
+                    },
+                    None => {
+                        warn!(%mint, "failed to derive bonding curve PDA");
+                        (None, None)
+                    }
+                };
                 if !meta_cache.contains_key(&mint) {
                     if let Ok(meta) = pumpfun::fetch_token_metadata(&rpc, &mint).await {
                         let _ =
@@ -716,7 +781,9 @@ impl App {
                 }));
             }
 
-            let _ = action_tx.send(Action::StatusMessage("Positions refreshed".into()));
+            if show_status {
+                let _ = action_tx.send(Action::StatusMessage("Positions refreshed".into()));
+            }
             refresh_sol_balance_task(&config, &action_tx).await;
         });
     }
@@ -728,11 +795,41 @@ impl App {
     }
 }
 
+fn is_rate_limited(e: &solana_client::client_error::ClientError) -> bool {
+    let msg = e.to_string();
+    msg.contains("429") || msg.contains("Too many requests") || msg.contains("rate limit")
+}
+
+async fn rpc_with_backoff<T, F, Fut>(action_tx: &mpsc::UnboundedSender<Action>, op: F) -> Result<T, solana_client::client_error::ClientError>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T, solana_client::client_error::ClientError>>,
+{
+    let mut delay = Duration::from_millis(500);
+    for attempt in 0..4 {
+        match op().await {
+            Ok(val) => return Ok(val),
+            Err(e) => {
+                if !is_rate_limited(&e) || attempt == 3 {
+                    return Err(e);
+                }
+                let _ = action_tx.send(Action::StatusMessage(format!(
+                    "Rate limited (429), retrying in {}ms...",
+                    delay.as_millis()
+                )));
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
+        }
+    }
+    unreachable!()
+}
+
 async fn refresh_sol_balance_task(
     config: &Arc<Config>,
     action_tx: &mpsc::UnboundedSender<Action>,
 ) {
-    let rpc = RpcClient::new(config.rpc_url.clone());
+    let rpc = RpcClient::new_with_commitment(config.rpc_url.clone(), solana_sdk::commitment_config::CommitmentConfig::processed());
     match rpc.get_balance(&config.payer.pubkey()).await {
         Ok(lamports) => {
             let sol = lamports as f64 / 1_000_000_000.0;

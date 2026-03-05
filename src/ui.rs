@@ -170,7 +170,7 @@ fn draw_launches(frame: &mut Frame, app: &App, area: Rect) {
         Cell::from("Name").style(Style::default().fg(Theme::ACCENT)),
         Cell::from("Supply").style(Style::default().fg(Theme::ACCENT)),
         Cell::from("Creator").style(Style::default().fg(Theme::ACCENT)),
-        Cell::from("Flags").style(Style::default().fg(Theme::ACCENT)),
+        Cell::from("Mode").style(Style::default().fg(Theme::ACCENT)),
         Cell::from("Age").style(Style::default().fg(Theme::ACCENT)),
     ])
     .height(1);
@@ -437,6 +437,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("ell  ", Style::default().fg(Theme::TEXT_DIM)),
         Span::styled("[R]", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
         Span::styled("efresh  ", Style::default().fg(Theme::TEXT_DIM)),
+        Span::styled("[O]", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled("pen  ", Style::default().fg(Theme::TEXT_DIM)),
         Span::styled("[Tab]", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
         Span::styled(" switch  ", Style::default().fg(Theme::TEXT_DIM)),
         Span::styled("[Q]", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
